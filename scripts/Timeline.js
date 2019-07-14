@@ -1,13 +1,9 @@
 function Timeline(clock, controls) {
 	this.events = []
+	this.points = []
 	this.active = []
 	this.pending = {}
 
-	this.orderS = []
-	this.orderE = []
-
-	this.indexS = 0
-	this.indexE = -1
 
 
 	this.clock = clock
@@ -27,20 +23,18 @@ Timeline.ATTRACT = 3
 Timeline.prototype = {
 
 	events: null,
-	orderS: null,
-	orderE: null,
-
-	indexS: null,
-	indexE: null,
+	points: null,
 
 	time: null,
 	timeDelta: null,
-	duration: 0,
+	duration: 300,
 	easing: null,
 	method: null,
 
 	pending: null,
 	needsFlush: false,
+
+	verbose: false,
 
 
 
@@ -82,7 +76,18 @@ Timeline.prototype = {
 			text: text
 		}
 
-		this.insert(track)
+		this.events.push(track)
+
+		this.updateTimePoints()
+
+		if(track.start < this.time) {
+			console.warn('[TL] added track with start in past')
+			this.activate(track, true, this.timeDelta >= 0, this.time)
+		}
+
+		if(track.end < this.time) {
+			console.warn('[TL] added track with end in past')
+		}
 
 		return track
 	},
@@ -158,7 +163,7 @@ Timeline.prototype = {
 			if(forward) this.drop(track)
 
 		} else {
-			this.activate(track, false, forward)
+			this.activate(track, false, forward, this.time)
 		}
 	},
 
@@ -170,61 +175,65 @@ Timeline.prototype = {
 		}
 	},
 
-	insert: function(track) {
+	/**
+	 * Sorting:
+	 * 1) same track start before end
+	 * 2) lower time first
+	 * 3) end before start
+	 * 4) shorter duration first ?
+	 * 5) order of appearance
+	 */
+	sortTimePoints: function(a, b) {
+		if(a.track === b.track) return a.end - b.end
 
-		var l = this.events.length
-		for(var fi = l - 1; fi >= 0; fi--) {
-			var ev = this.events[this.orderS[fi]]
-			if(ev.start === track.start && ev.index < track.index && ev.duration <= track.duration) break
-			if(ev.start < track.start) break
+		var dt = a.time - b.time
+		if(dt) return dt
+
+		var de = a.end - b.end
+		if(de) return -de
+
+		var dd = a.track.duration - b.track.duration
+		if(dd) return dd
+
+		var di = a.track.index - b.track.index
+		return di
+	},
+
+	updateTimePoints: function() {
+		this.points = []
+
+		for(var i = 0; i < this.events.length; i++) {
+			var e = this.events[i]
+
+			this.points.push({
+				time: e.start,
+				end: 0,
+				track: e
+			}, {
+				time: e.end,
+				end: 1,
+				track: e
+			})
 		}
 
-		for(var bi = l - 1; bi >= 0; bi--) {
-			var ev = this.events[this.orderE[bi]]
-			if(ev.end === track.end && ev.index < track.index && ev.duration <= track.duration) break
-			if(ev.end < track.end) break
-		}
-
-		this.orderS.splice(fi + 1, 0, track.index)
-		this.orderE.splice(bi + 1, 0, track.index)
-
-		if(fi + 1 < this.indexS) this.indexS++
-		if(bi + 1 < this.indexE) this.indexE++
-
-
-
-		this.events.push(track)
-
-		if(track.start < this.time) {
-			this.activate(track, true, this.timeDelta >= 0)
-			this.indexS++
-			this.indexE++
-		}
+		this.points.sort(this.sortTimePoints)
 	},
 
 	drop: function(track) {
-		var fi = this.orderS.indexOf(track.index)
-		var bi = this.orderE.indexOf(track.index)
-		var ei = this.events.indexOf(track)
-		if(fi === -1 || bi === -1 || ei === -1) return
+		var index = this.events.indexOf(track)
+		if(index === -1) return
 
-		this.orderS.splice(fi, 1)
-		this.orderE.splice(bi, 1)
-		this.events.splice(ei, 1)
+		this.events.splice(index, 1)
 
-		for(var i = ei; i < this.events.length; i++) {
+		for(var i = index; i < this.events.length; i++) {
 			this.events[i].index--
 		}
-		for(var i = 0; i < this.events.length; i++) {
-			if(this.orderS[i] >= ei) this.orderS[i]--
-			if(this.orderE[i] >= ei) this.orderE[i]--
-		}
 
-		if(this.indexS > fi) this.indexS--
-		if(this.indexE > bi) this.indexE--
 
 		var ai = this.active.indexOf(track)
 		if(ai !== -1) this.active.splice(ai, 1)
+
+		this.updateTimePoints()
 	},
 
 	dropList: function(list) {
@@ -274,12 +283,7 @@ Timeline.prototype = {
 	clear: function(time) {
 		this.active = []
 		this.events = []
-
-		this.orderS = []
-		this.orderE = []
-
-		this.indexS = 0
-		this.indexE = -1
+		this.points = []
 	},
 
 	revert: function(batch, time) {
@@ -292,19 +296,43 @@ Timeline.prototype = {
 		}
 	},
 
-	activate: function(track, enabled, forward) {
-		var iv = this.controls.inputVal
+	activate: function(track, enabled, forward, time) {
+		var index = this.active.indexOf(track)
+		if((index === -1) ^ enabled) return
 
-		if(!enabled) {
-			if(forward) {
-				track.end = this.time
-			} else {
-				track.start = this.time
-			}
-			track.duration = track.end - track.start
+
+		if(enabled) {
+			this.active.push(track)
+		} else {
+			this.active.splice(index, 1)
 		}
 
-		var overwrite = enabled ^ forward ? track.target : track.source
+
+
+		var end = enabled ^ forward
+
+		track.position = end ? 1 : 0
+		track.active = enabled
+
+
+		if(!enabled) {
+			var point = forward ? track.end : track.start
+			if(point === time) return
+
+			if(forward) {
+				track.end = time
+			} else {
+				track.start = time
+			}
+			track.duration = track.end - track.start
+
+			this.updateTimePoints()
+		}
+
+
+		var iv = this.controls.inputVal
+
+		var overwrite = end ? track.target : track.source
 		for(var key in track.target) {
 			overwrite[key] = key in this.pending ? this.pending[key] : iv[key]
 
@@ -312,31 +340,15 @@ Timeline.prototype = {
 			,   dst = track.target[key]
 			track.delta[key] = typeof src === 'number' && typeof dst === 'number' ? dst - src : NaN
 		}
-
-		track.position = enabled ^ forward ? 1 : 0
-		track.active = enabled
-
-		var ai = this.events.indexOf(track)
-		var si = this.orderS.indexOf(ai)
-		var ei = this.orderS.indexOf(ai)
-		console.log('-+'[+enabled], this.clock.frame, f.hround(performance.now()), '#'+ ai, '>'+ si, ei +'<')
-
-		if(enabled) {
-			if(this.updateTrack(track, this.time, this.timeDelta)) {
-				forward ? this.active.unshift(track) : this.active.push(track)
-			}
-		} else {
-			this.active.splice(this.active.indexOf(track), 1)
-		}
 	},
 
-	updateTrack: function(track, t, dt) {
+	updateTrack: function(track, t, forward) {
 		var ts = track.start
-		,   td = Math.max(1e-10, track.duration)
+		,   td = track.duration
 		,   te = Math.max(ts + td, track.end)
 		,   tc = Math.max(ts, Math.min(te, t))
 
-		var c = (tc - ts) / td
+		var c = td ? (tc - ts) / td : forward ? 1 : 0
 		,   p = track.loop ? track.mirror && Math.floor(c) % 2 ? 1 - (c % 1) : c % 1 : Math.max(0, Math.min(1, c))
 		,   k = track.easing ? track.easing(p) : p
 		,   d = k - track.position
@@ -356,7 +368,7 @@ Timeline.prototype = {
 						this.enqueue(key, val, d)
 
 					} else {
-						this.enqueue(key, dt > 0 ? track.target[key] : track.source[key], 0)
+						this.enqueue(key, forward ? track.target[key] : track.source[key], 0)
 					}
 				}
 			break
@@ -364,12 +376,6 @@ Timeline.prototype = {
 
 		track.position = k
 		track.active = tc === t
-
-		// if(track.update) {
-		// 	track.update(t, dt)
-		// }
-
-		return track.active
 	},
 
 	getDelta: function(from, to) {
@@ -384,56 +390,72 @@ Timeline.prototype = {
 
 	update: function(t, dt) {
 		var pt = this.time
-		var ct = pt
+
 
 		this.time = t
-		this.timeDelta = dt
+		// this.timeDelta = dt
+		this.timeDelta = t - pt
 
-
-		var l = this.events.length
-
-		var orderF = dt >= 0 ? this.orderS : this.orderE
-		var orderB = dt >= 0 ? this.orderE : this.orderS
-		var prevF = dt >= 0 ? this.indexS : this.indexE
-		var prevB = dt >= 0 ? this.indexE : this.indexS
+		var fw = this.timeDelta >= 0
 
 
 
-		for(this.indexS = 0; this.indexS < l; this.indexS++) {
-			if(this.events[this.orderS[this.indexS]].start > t) break
+
+
+		var currT = pt
+		var nextT = t
+		var currI = fw ? 0 : -1
+		var nextI = fw ? 0 : -1
+		for(var i = -1; i < this.points.length; i++) {
+			var p = this.points[i + (fw ? 0 : 1)]
+			if(!p) continue
+
+			if(currT > p.time) currI++
+			if(nextT > p.time) nextI++
+			if(currT <= p.time && nextT <= p.time) break
 		}
-		for(this.indexE = l - 1; this.indexE >= 0; this.indexE--) {
-			if(this.events[this.orderE[this.indexE]].end < t) break
-		}
-
-		var nextF = dt >= 0 ? this.indexS : this.indexE
-		var nextB = dt >= 0 ? this.indexE : this.indexS
-
-		// do {
-
-		// } while()
 
 
-		if(dt) for(var i = this.active.length -1; i >= 0; i--) {
-			if(!this.updateTrack(this.active[i], t, dt)) {
-				this.active.splice(i, 1)
+		var verbose = this.verbose && currI !== nextI
+		if(verbose) console.log('frame', this.clock.frame, f.hround(this.clock.time))
+
+		while(currI !== nextI) {
+			var p = this.points[currI]
+			currI += fw ? 1 : -1
+
+			if(!p) continue
+
+
+			for(var i = 0; i < this.active.length; i++) {
+				this.updateTrack(this.active[i], p.time, fw)
 			}
-		}
+
+			if(verbose) console.log('=', this.active.length, 'by', p.time - currT, this.pending)
 
 
+			if(verbose) {
+				console.log('-+'[+(fw ^ p.end)], p.track.index)
+			}
 
-		var a, ai
-		for(var i = this.indexE; i > ai; i--) {
-			this.activate(this.events[a[i]], true, false)
+			this.activate(p.track, fw ^ p.end, fw, p.time)
+
+			currT = p.time
 		}
-		for(var i = this.indexS; i < ai; i++) {
-			this.activate(this.events[a[i]], true, true)
+
+		for(var i = 0; i < this.active.length; i++) {
+			this.updateTrack(this.active[i], t, fw)
 		}
+
+		if(verbose) console.log('=', this.active.length, 'by', t - currT, this.pending)
+
+
 
 		if(this.needsFlush) {
 			this.needsFlush = false
 			this.controls.setInputs(this.pending, 0)
 			this.pending = {}
 		}
+
+		if(verbose) console.log('\n')
 	}
 }
